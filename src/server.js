@@ -40,6 +40,8 @@ const activityRoutes = require('./routes/activity');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+
+
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
@@ -101,6 +103,37 @@ app.get('/__envcheck', (req, res) => {
     hasDbName: !!process.env.DB_NAME,
     envFilesChecked: envPaths.map(p => ({ path: p, exists: fs.existsSync(p) })),
     cwd: process.cwd(),
+  });
+});
+
+// DEBUG: Temporary email test - REMOVE AFTER DEBUGGING
+app.get('/__emailtest', async (req, res) => {
+  const postmark = require('postmark');
+  const tokenExists = !!process.env.POSTMARK_TOKEN;
+  const tokenStart = process.env.POSTMARK_TOKEN ? process.env.POSTMARK_TOKEN.substring(0, 8) + '...' : 'none';
+  
+  let testResult = 'Not attempted';
+  
+  if (tokenExists) {
+    try {
+      const client = new postmark.ServerClient(process.env.POSTMARK_TOKEN);
+      await client.sendEmail({
+        From: process.env.POSTMARK_FROM || 'vacation@kurrant.com',
+        To: 'jo@kurrant.com',
+        Subject: '🧪 Test Email from Kurrant TimeOff',
+        TextBody: 'If you receive this, Postmark is working!'
+      });
+      testResult = 'Email sent successfully!';
+    } catch (err) {
+      testResult = 'Error: ' + err.message;
+    }
+  }
+  
+  res.json({
+    tokenExists,
+    tokenStart,
+    fromEmail: process.env.POSTMARK_FROM || 'not set',
+    testResult
   });
 });
 
