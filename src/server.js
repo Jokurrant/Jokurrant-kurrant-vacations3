@@ -7,12 +7,11 @@ const path = require('path');
 const fs = require('fs');
 
 // Try multiple .env locations in order of priority:
-// 1. User home directory (persists across GitHub deploys)
-// 2. Domain root (outside public_html but inside domain folder)
-// 3. Project root (public_html - local dev / manual deploy)
+// 1. Separate env folder (persists across GitHub deploys)
+// 2. Project root (local dev / manual deploy)
 const envPaths = [
-  '/home/u655822750/domains/vacationsenv/.env',                 // Domain root (where you uploaded!)
-  path.join(__dirname, '../.env'),                                                            // Project root
+  '/home/u655822750/domains/vacationsenv/.env',
+  path.join(__dirname, '../.env'),
 ];
 
 let envLoaded = false;
@@ -40,8 +39,6 @@ const activityRoutes = require('./routes/activity');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-
-
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
@@ -58,7 +55,7 @@ app.use(helmet({
 // Rate limiting - general API
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500, // limit each IP to 500 requests per windowMs (generous)
+  max: 500, // limit each IP to 500 requests per windowMs
   message: { error: 'Too many requests, please try again later' }
 });
 app.use('/api/', limiter);
@@ -68,8 +65,8 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 20, // 20 login attempts per 15 minutes
   message: { error: 'Too many login attempts, please wait 15 minutes' },
-  skipSuccessfulRequests: true, // Don't count successful logins
-  skip: (req) => req.method !== 'POST' // Only limit POST requests
+  skipSuccessfulRequests: true,
+  skip: (req) => req.method !== 'POST'
 });
 app.use('/api/auth/login', authLimiter);
 
@@ -86,57 +83,6 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// DEBUG: Temporary env check route - REMOVE AFTER DEBUGGING
-app.get('/__envcheck', (req, res) => {
-  const envPaths = [
-    '/home/u655822750/.env',
-    '/home/u655822750/domains/dodgerblue-otter-705031.hostingersite.com/.env',
-    path.join(__dirname, '../.env'),
-  ];
-  
-  res.json({
-    nodeEnv: process.env.NODE_ENV,
-    hasJwtSecret: !!process.env.JWT_SECRET,
-    hasDbHost: !!process.env.DB_HOST,
-    hasDbUser: !!process.env.DB_USER,
-    hasDbPassword: !!process.env.DB_PASSWORD,
-    hasDbName: !!process.env.DB_NAME,
-    envFilesChecked: envPaths.map(p => ({ path: p, exists: fs.existsSync(p) })),
-    cwd: process.cwd(),
-  });
-});
-
-// DEBUG: Temporary email test - REMOVE AFTER DEBUGGING
-app.get('/__emailtest', async (req, res) => {
-  const postmark = require('postmark');
-  const tokenExists = !!process.env.POSTMARK_TOKEN;
-  const tokenStart = process.env.POSTMARK_TOKEN ? process.env.POSTMARK_TOKEN.substring(0, 8) + '...' : 'none';
-  
-  let testResult = 'Not attempted';
-  
-  if (tokenExists) {
-    try {
-      const client = new postmark.ServerClient(process.env.POSTMARK_TOKEN);
-      await client.sendEmail({
-        From: process.env.POSTMARK_FROM || 'vacation@kurrant.com',
-        To: 'jo@kurrant.com',
-        Subject: '🧪 Test Email from Kurrant TimeOff',
-        TextBody: 'If you receive this, Postmark is working!'
-      });
-      testResult = 'Email sent successfully!';
-    } catch (err) {
-      testResult = 'Error: ' + err.message;
-    }
-  }
-  
-  res.json({
-    tokenExists,
-    tokenStart,
-    fromEmail: process.env.POSTMARK_FROM || 'not set',
-    testResult
-  });
-});
-
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -144,7 +90,7 @@ app.use('/api/vacations', vacationRoutes);
 app.use('/api/blackouts', blackoutRoutes);
 app.use('/api/activity', activityRoutes);
 
-// Serve static files (React frontend)
+// Serve static files
 app.use(express.static(path.join(__dirname, '../public')));
 
 // Health check
@@ -152,7 +98,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Catch-all: serve React app for any non-API route
+// Catch-all: serve app for any non-API route
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
