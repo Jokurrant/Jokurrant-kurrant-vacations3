@@ -23,8 +23,8 @@ async function api(url, opt={}) {
 }
 
 const color = (id) => COLORS[S.users.findIndex(u=>u.id===id)%COLORS.length];
-const bizDays = (s,e) => { let c=0,d=parseDate(s); const end=parseDate(e); while(d<=end){if(d.getDay()%6)c++;d.setDate(d.getDate()+1)} return c; };
 const parseDate = d => { if(!d)return new Date(); const parts=d.split('T')[0].split('-'); return new Date(parts[0],parts[1]-1,parts[2]); };
+const bizDays = (s,e) => { let c=0,d=parseDate(s); const end=parseDate(e); while(d<=end){if(d.getDay()%6)c++;d.setDate(d.getDate()+1)} return c; };
 const fmt = d => { const p=parseDate(d); return p.getFullYear()+'-'+String(p.getMonth()+1).padStart(2,'0')+'-'+String(p.getDate()).padStart(2,'0'); };
 const fmtNice = d => parseDate(d).toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'});
 const fmtTime = d => new Date(d).toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
