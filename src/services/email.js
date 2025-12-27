@@ -1,449 +1,465 @@
-const express = require('express');
-const db = require('../../config/database');
-const { authenticate, requireAdmin } = require('../middleware/auth');
-const { notifyVacationSubmitted, notifyVacationCancelled, notifyVacationAdminCancelled, notifyBlackoutApprovalRequest, notifyVacationApproved, notifyVacationDeclined } = require('../services/email');
-const { log, ACTIONS } = require('../services/activityLog');
+const postmark = require('postmark');
+require('dotenv').config();
 
-const router = express.Router();
+let client = null;
 
-// Calculate business days between two dates
-const getBusinessDays = (start, end) => {
-  let count = 0;
-  const current = new Date(start);
-  const endDate = new Date(end);
-  while (current <= endDate) {
-    const day = current.getDay();
-    if (day !== 0 && day !== 6) count++;
-    current.setDate(current.getDate() + 1);
+if (process.env.POSTMARK_TOKEN) {
+  client = new postmark.ServerClient(process.env.POSTMARK_TOKEN);
+}
+
+const fromEmail = process.env.POSTMARK_FROM || 'noreply@kurrant.com';
+
+async function sendToAdmins(db, subject, htmlBody, textBody) {
+  if (!client) {
+    console.log('📧 Postmark not configured - skipping email');
+    return;
   }
-  return count;
-};
 
-// Check if dates overlap with blackout - returns overlapping blackout info or null
-const checkBlackoutOverlap = async (startDate, endDate) => {
-  const [blackouts] = await db.execute(
-    `SELECT id, reason FROM blackout_dates 
-     WHERE (start_date <= ? AND end_date >= ?) 
-        OR (start_date <= ? AND end_date >= ?)
-        OR (start_date >= ? AND end_date <= ?)`,
-    [endDate, startDate, startDate, startDate, startDate, endDate]
-  );
-  return blackouts.length > 0 ? blackouts[0] : null;
-};
-
-// Get all vacation requests
-router.get('/', authenticate, async (req, res) => {
   try {
-    const [requests] = await db.execute(
-      `SELECT v.*, u.name as user_name 
-       FROM vacation_requests v 
-       JOIN users u ON v.user_id = u.id 
-       WHERE v.status != 'cancelled'
-       ORDER BY v.start_date DESC`
-    );
+    // Get only admin emails
+    const [admins] = await db.execute("SELECT email, name FROM users WHERE role = 'admin'");
     
-    res.json(requests.map(r => ({
-      id: r.id,
-      userId: r.user_id,
-      userName: r.user_name,
-      startDate: r.start_date,
-      endDate: r.end_date,
-      reason: r.reason,
-      days: r.days,
-      status: r.status,
-      requiresApproval: r.requires_approval === 1,
-      declineReason: r.decline_reason,
-      createdAt: r.created_at
-    })));
+    for (const admin of admins) {
+      try {
+        await client.sendEmail({
+          From: fromEmail,
+          To: admin.email,
+          Subject: subject,
+          HtmlBody: htmlBody,
+          TextBody: textBody
+        });
+        console.log(`📧 Email sent to admin ${admin.email}`);
+      } catch (err) {
+        console.error(`❌ Failed to send email to ${admin.email}:`, err.message);
+      }
+    }
   } catch (error) {
-    console.error('Get vacations error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('❌ Email service error:', error.message);
   }
-});
+}
 
-// Get yearly stats (admin only)
-router.get('/stats/yearly', authenticate, requireAdmin, async (req, res) => {
+function formatDate(date) {
+  return new Date(date).toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  });
+}
+
+async function notifyVacationSubmitted(db, userName, startDate, endDate, days, reason) {
+  const subject = `🏖️ New Vacation Request: ${userName}`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #333;">New Vacation Request</h2>
+        <p><strong>${userName}</strong> has submitted a vacation request:</p>
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>Duration:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Reason:</strong></td>
+            <td style="padding: 10px;">${reason || 'Not specified'}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const textBody = `New Vacation Request\n\n${userName} has submitted a vacation request:\n\nFrom: ${formatDate(startDate)}\nTo: ${formatDate(endDate)}\nDuration: ${days} business day(s)\nReason: ${reason || 'Not specified'}`;
+
+  await sendToAdmins(db, subject, htmlBody, textBody);
+}
+
+async function notifyVacationCancelled(db, userName, cancelledBy, startDate, endDate, days, reason) {
+  const subject = `❌ Vacation Cancelled: ${userName}`;
+  const cancelledByText = userName === cancelledBy ? 'by themselves' : `by ${cancelledBy}`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #dc2626;">Vacation Cancelled</h2>
+        <p><strong>${userName}</strong>'s vacation has been cancelled ${cancelledByText}:</p>
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Duration:</strong></td>
+            <td style="padding: 10px;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Vacation Cancelled\n\n${userName}'s vacation has been cancelled ${cancelledByText}:\n\nFrom: ${formatDate(startDate)}\nTo: ${formatDate(endDate)}\nDuration: ${days} business day(s)`;
+
+  await sendToAdmins(db, subject, htmlBody, textBody);
+}
+
+async function sendWelcomeEmail(userEmail, userName, tempPassword, loginUrl) {
+  if (!client) {
+    console.log('📧 Postmark not configured - skipping welcome email');
+    return;
+  }
+
+  const subject = `🎉 Welcome to Kurrant TimeOff!`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #333;">Welcome, ${userName}!</h2>
+        <p>Your account has been created for the Kurrant TimeOff system. You can now request vacation days and view your team's calendar.</p>
+        
+        <div style="background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0;">
+          <h3 style="margin: 0 0 15px; color: #FE6B35;">Your Login Credentials</h3>
+          <table style="width: 100%;">
+            <tr>
+              <td style="padding: 8px 0;"><strong>Email:</strong></td>
+              <td style="padding: 8px 0;">${userEmail}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 0;"><strong>Temporary Password:</strong></td>
+              <td style="padding: 8px 0; font-family: monospace; font-size: 16px; color: #FE6B35;">${tempPassword}</td>
+            </tr>
+          </table>
+        </div>
+        
+        <div style="background: #fff8f5; border: 1px solid #fed7c7; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #c2410c;"><strong>⚠️ Important:</strong> You will be asked to change your password when you first log in.</p>
+        </div>
+        
+        <p style="margin-top: 20px;">
+          <a href="${loginUrl}" style="display: inline-block; background: #FE6B35; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">Log In Now →</a>
+        </p>
+        
+        <p style="color: #666; font-size: 14px; margin-top: 30px;">If you have any questions, please contact your administrator.</p>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Welcome to Kurrant TimeOff!
+
+Hi ${userName},
+
+Your account has been created for the Kurrant TimeOff system.
+
+Your Login Credentials:
+- Email: ${userEmail}
+- Temporary Password: ${tempPassword}
+
+IMPORTANT: You will be asked to change your password when you first log in.
+
+Log in here: ${loginUrl}
+
+If you have any questions, please contact your administrator.`;
+
   try {
-    const year = parseInt(req.query.year) || new Date().getFullYear();
-    
-    const [stats] = await db.execute(
-      `SELECT 
-        u.id as userId,
-        u.name as userName,
-        u.email,
-        COALESCE(SUM(v.days), 0) as totalDays,
-        COUNT(v.id) as totalRequests
-       FROM users u
-       LEFT JOIN vacation_requests v ON u.id = v.user_id 
-         AND v.status != 'cancelled'
-         AND YEAR(v.start_date) = ?
-       GROUP BY u.id, u.name, u.email
-       ORDER BY totalDays DESC`,
-      [year]
-    );
-    
-    res.json({
-      year,
-      stats: stats.map(s => ({
-        userId: s.userId,
-        userName: s.userName,
-        email: s.email,
-        totalDays: parseInt(s.totalDays),
-        totalRequests: parseInt(s.totalRequests)
-      }))
+    await client.sendEmail({
+      From: fromEmail,
+      To: userEmail,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody
     });
-  } catch (error) {
-    console.error('Get yearly stats error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.log(`📧 Welcome email sent to ${userEmail}`);
+  } catch (err) {
+    console.error(`❌ Failed to send welcome email to ${userEmail}:`, err.message);
   }
-});
+}
 
-// Get my vacation requests
-router.get('/my', authenticate, async (req, res) => {
-  try {
-    const [requests] = await db.execute(
-      `SELECT * FROM vacation_requests 
-       WHERE user_id = ? AND status != 'cancelled'
-       ORDER BY start_date DESC`,
-      [req.user.id]
-    );
-    
-    res.json(requests.map(r => ({
-      id: r.id,
-      userId: r.user_id,
-      startDate: r.start_date,
-      endDate: r.end_date,
-      reason: r.reason,
-      days: r.days,
-      status: r.status,
-      requiresApproval: r.requires_approval === 1,
-      declineReason: r.decline_reason,
-      createdAt: r.created_at
-    })));
-  } catch (error) {
-    console.error('Get my vacations error:', error);
-    res.status(500).json({ error: 'Server error' });
+async function notifyVacationAdminCancelled(userEmail, userName, adminName, startDate, endDate, days, reason) {
+  if (!client) {
+    console.log('📧 Postmark not configured - skipping admin cancellation email');
+    return;
   }
-});
 
-// Create vacation request (no limits!)
-router.post('/', authenticate, async (req, res) => {
+  const subject = `⚠️ Your Vacation Has Been Cancelled`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #dc2626;">Vacation Cancelled</h2>
+        <p>Hi ${userName},</p>
+        <p>Your vacation request has been cancelled by <strong>${adminName}</strong>.</p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>Duration:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+        </table>
+        
+        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #dc2626;"><strong>Reason for cancellation:</strong></p>
+          <p style="margin: 10px 0 0; color: #333;">${reason}</p>
+        </div>
+        
+        <p style="color: #666; font-size: 14px; margin-top: 30px;">If you have questions about this cancellation, please contact your administrator.</p>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Vacation Cancelled
+
+Hi ${userName},
+
+Your vacation request has been cancelled by ${adminName}.
+
+From: ${formatDate(startDate)}
+To: ${formatDate(endDate)}
+Duration: ${days} business day(s)
+
+Reason for cancellation:
+${reason}
+
+If you have questions about this cancellation, please contact your administrator.`;
+
   try {
-    const { startDate, endDate, reason } = req.body;
-
-    if (!startDate || !endDate) {
-      return res.status(400).json({ error: 'Start and end date required' });
-    }
-
-    // Check for blackout overlap
-    const blackoutOverlap = await checkBlackoutOverlap(startDate, endDate);
-    
-    // Calculate business days
-    const days = getBusinessDays(startDate, endDate);
-
-    // If overlaps with blackout, create as pending and requires approval
-    if (blackoutOverlap) {
-      const [result] = await db.execute(
-        'INSERT INTO vacation_requests (user_id, start_date, end_date, reason, days, status, requires_approval) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [req.user.id, startDate, endDate, reason || '', days, 'pending', true]
-      );
-
-      // Log activity
-      await log(
-        req.user.id,
-        req.user.name,
-        ACTIONS.VACATION_SUBMITTED,
-        `Requested vacation during blackout period from ${startDate} to ${endDate} (${days} days) - Pending approval - ${reason || 'No reason specified'}`,
-        'vacation',
-        result.insertId
-      );
-
-      // Send email notification to admins for approval
-      notifyBlackoutApprovalRequest(db, req.user.name, startDate, endDate, days, reason)
-        .catch(err => console.error('Email notification error:', err));
-
-      return res.status(201).json({
-        id: result.insertId,
-        userId: req.user.id,
-        userName: req.user.name,
-        startDate,
-        endDate,
-        reason,
-        days,
-        status: 'pending',
-        requiresApproval: true,
-        createdAt: new Date(),
-        message: 'Your request overlaps with a blackout period and requires admin approval. You will be notified once it is reviewed.'
-      });
-    }
-
-    // Normal request - auto-approved
-    const [result] = await db.execute(
-      'INSERT INTO vacation_requests (user_id, start_date, end_date, reason, days, status, requires_approval) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [req.user.id, startDate, endDate, reason || '', days, 'approved', false]
-    );
-
-    // Log activity
-    await log(
-      req.user.id,
-      req.user.name,
-      ACTIONS.VACATION_SUBMITTED,
-      `Requested vacation from ${startDate} to ${endDate} (${days} days) - ${reason || 'No reason specified'}`,
-      'vacation',
-      result.insertId
-    );
-
-    // Send email notification to admins only
-    notifyVacationSubmitted(db, req.user.name, startDate, endDate, days, reason)
-      .catch(err => console.error('Email notification error:', err));
-
-    res.status(201).json({
-      id: result.insertId,
-      userId: req.user.id,
-      userName: req.user.name,
-      startDate,
-      endDate,
-      reason,
-      days,
-      status: 'approved',
-      requiresApproval: false,
-      createdAt: new Date()
+    await client.sendEmail({
+      From: fromEmail,
+      To: userEmail,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody
     });
-  } catch (error) {
-    console.error('Create vacation error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.log(`📧 Admin cancellation email sent to ${userEmail}`);
+  } catch (err) {
+    console.error(`❌ Failed to send admin cancellation email to ${userEmail}:`, err.message);
   }
-});
+}
 
-// Cancel vacation request
-router.delete('/:id', authenticate, async (req, res) => {
+async function notifyBlackoutApprovalRequest(db, userName, startDate, endDate, days, reason) {
+  const subject = `⚠️ Blackout Date Vacation Request: ${userName}`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #f59e0b;">⚠️ Approval Required</h2>
+        <p><strong>${userName}</strong> has requested vacation during a <strong>blackout period</strong> and requires your approval:</p>
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>Duration:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Reason:</strong></td>
+            <td style="padding: 10px;">${reason || 'Not specified'}</td>
+          </tr>
+        </table>
+        <div style="background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #92400e;"><strong>Action Required:</strong> Please log in to the admin panel to approve or decline this request.</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Blackout Date Vacation Request - Approval Required
+
+${userName} has requested vacation during a blackout period and requires your approval:
+
+From: ${formatDate(startDate)}
+To: ${formatDate(endDate)}
+Duration: ${days} business day(s)
+Reason: ${reason || 'Not specified'}
+
+Please log in to the admin panel to approve or decline this request.`;
+
+  await sendToAdmins(db, subject, htmlBody, textBody);
+}
+
+async function notifyVacationApproved(userEmail, userName, adminName, startDate, endDate, days) {
+  if (!client) {
+    console.log('📧 Postmark not configured - skipping approval email');
+    return;
+  }
+
+  const subject = `✅ Your Vacation Request Has Been Approved!`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #16a34a;">✅ Vacation Approved</h2>
+        <p>Hi ${userName},</p>
+        <p>Great news! Your vacation request has been <strong>approved</strong> by ${adminName}.</p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Duration:</strong></td>
+            <td style="padding: 10px;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+        </table>
+        
+        <div style="background: #dcfce7; border: 1px solid #86efac; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #166534;">Your time off is now confirmed! Enjoy your vacation! 🏖️</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Vacation Approved!
+
+Hi ${userName},
+
+Great news! Your vacation request has been approved by ${adminName}.
+
+From: ${formatDate(startDate)}
+To: ${formatDate(endDate)}
+Duration: ${days} business day(s)
+
+Your time off is now confirmed! Enjoy your vacation!`;
+
   try {
-    const { id } = req.params;
-
-    // Get the request with user name
-    const [requests] = await db.execute(
-      `SELECT v.*, u.name as user_name 
-       FROM vacation_requests v 
-       JOIN users u ON v.user_id = u.id 
-       WHERE v.id = ?`,
-      [id]
-    );
-
-    if (requests.length === 0) {
-      return res.status(404).json({ error: 'Request not found' });
-    }
-
-    const request = requests[0];
-
-    // Check permission (own request or admin)
-    if (request.user_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-
-    // Update status to cancelled
-    await db.execute(
-      'UPDATE vacation_requests SET status = ? WHERE id = ?',
-      ['cancelled', id]
-    );
-
-    // Log activity
-    await log(
-      req.user.id,
-      req.user.name,
-      ACTIONS.VACATION_CANCELLED,
-      `Cancelled vacation for ${request.user_name} from ${request.start_date} to ${request.end_date} (${request.days} days)`,
-      'vacation',
-      id
-    );
-
-    // Send email notification to admins only
-    notifyVacationCancelled(db, request.user_name, req.user.name, request.start_date, request.end_date, request.days, request.reason)
-      .catch(err => console.error('Email notification error:', err));
-
-    res.json({ message: 'Vacation cancelled' });
-  } catch (error) {
-    console.error('Cancel vacation error:', error);
-    res.status(500).json({ error: 'Server error' });
+    await client.sendEmail({
+      From: fromEmail,
+      To: userEmail,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody
+    });
+    console.log(`📧 Vacation approval email sent to ${userEmail}`);
+  } catch (err) {
+    console.error(`❌ Failed to send approval email to ${userEmail}:`, err.message);
   }
-});
+}
 
-// Admin cancel vacation request with reason (sends email to user)
-router.post('/:id/admin-cancel', authenticate, requireAdmin, async (req, res) => {
+async function notifyVacationDeclined(userEmail, userName, adminName, startDate, endDate, days, reason) {
+  if (!client) {
+    console.log('📧 Postmark not configured - skipping decline email');
+    return;
+  }
+
+  const subject = `❌ Your Vacation Request Has Been Declined`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #dc2626;">❌ Vacation Request Declined</h2>
+        <p>Hi ${userName},</p>
+        <p>Unfortunately, your vacation request has been <strong>declined</strong> by ${adminName}.</p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Duration:</strong></td>
+            <td style="padding: 10px;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+        </table>
+        
+        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #dc2626;"><strong>Reason:</strong></p>
+          <p style="margin: 10px 0 0; color: #333;">${reason}</p>
+        </div>
+        
+        <p style="color: #666; font-size: 14px; margin-top: 30px;">If you have questions, please contact your administrator.</p>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Vacation Request Declined
+
+Hi ${userName},
+
+Unfortunately, your vacation request has been declined by ${adminName}.
+
+From: ${formatDate(startDate)}
+To: ${formatDate(endDate)}
+Duration: ${days} business day(s)
+
+Reason:
+${reason}
+
+If you have questions, please contact your administrator.`;
+
   try {
-    const { id } = req.params;
-    const { reason } = req.body;
-
-    if (!reason || !reason.trim()) {
-      return res.status(400).json({ error: 'Reason is required' });
-    }
-
-    // Get the request with user info
-    const [requests] = await db.execute(
-      `SELECT v.*, u.name as user_name, u.email as user_email 
-       FROM vacation_requests v 
-       JOIN users u ON v.user_id = u.id 
-       WHERE v.id = ?`,
-      [id]
-    );
-
-    if (requests.length === 0) {
-      return res.status(404).json({ error: 'Request not found' });
-    }
-
-    const request = requests[0];
-
-    // Update status to cancelled
-    await db.execute(
-      'UPDATE vacation_requests SET status = ? WHERE id = ?',
-      ['cancelled', id]
-    );
-
-    // Log activity
-    await log(
-      req.user.id,
-      req.user.name,
-      'vacation_admin_cancelled',
-      `Admin cancelled vacation for ${request.user_name} from ${request.start_date} to ${request.end_date} (${request.days} days). Reason: ${reason}`,
-      'vacation',
-      id
-    );
-
-    // Send email notification to the user
-    notifyVacationAdminCancelled(
-      request.user_email,
-      request.user_name,
-      req.user.name,
-      request.start_date,
-      request.end_date,
-      request.days,
-      reason
-    ).catch(err => console.error('Email notification error:', err));
-
-    res.json({ message: 'Vacation cancelled and user notified' });
-  } catch (error) {
-    console.error('Admin cancel vacation error:', error);
-    res.status(500).json({ error: 'Server error' });
+    await client.sendEmail({
+      From: fromEmail,
+      To: userEmail,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody
+    });
+    console.log(`📧 Vacation decline email sent to ${userEmail}`);
+  } catch (err) {
+    console.error(`❌ Failed to send decline email to ${userEmail}:`, err.message);
   }
-});
+}
 
-// Admin approve vacation request (for blackout date requests)
-router.post('/:id/approve', authenticate, requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Get the request with user info
-    const [requests] = await db.execute(
-      `SELECT v.*, u.name as user_name, u.email as user_email 
-       FROM vacation_requests v 
-       JOIN users u ON v.user_id = u.id 
-       WHERE v.id = ?`,
-      [id]
-    );
-
-    if (requests.length === 0) {
-      return res.status(404).json({ error: 'Request not found' });
-    }
-
-    const request = requests[0];
-
-    if (request.status !== 'pending') {
-      return res.status(400).json({ error: 'Only pending requests can be approved' });
-    }
-
-    // Update status to approved
-    await db.execute(
-      'UPDATE vacation_requests SET status = ? WHERE id = ?',
-      ['approved', id]
-    );
-
-    // Log activity
-    await log(
-      req.user.id,
-      req.user.name,
-      'vacation_approved',
-      `Approved blackout vacation for ${request.user_name} from ${request.start_date} to ${request.end_date} (${request.days} days)`,
-      'vacation',
-      id
-    );
-
-    // Send email notification to the user
-    notifyVacationApproved(
-      request.user_email,
-      request.user_name,
-      req.user.name,
-      request.start_date,
-      request.end_date,
-      request.days
-    ).catch(err => console.error('Email notification error:', err));
-
-    res.json({ message: 'Vacation approved and user notified' });
-  } catch (error) {
-    console.error('Approve vacation error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Admin decline vacation request (for blackout date requests)
-router.post('/:id/decline', authenticate, requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { reason } = req.body;
-
-    if (!reason || !reason.trim()) {
-      return res.status(400).json({ error: 'Reason is required' });
-    }
-
-    // Get the request with user info
-    const [requests] = await db.execute(
-      `SELECT v.*, u.name as user_name, u.email as user_email 
-       FROM vacation_requests v 
-       JOIN users u ON v.user_id = u.id 
-       WHERE v.id = ?`,
-      [id]
-    );
-
-    if (requests.length === 0) {
-      return res.status(404).json({ error: 'Request not found' });
-    }
-
-    const request = requests[0];
-
-    if (request.status !== 'pending') {
-      return res.status(400).json({ error: 'Only pending requests can be declined' });
-    }
-
-    // Update status to rejected and set decline reason
-    await db.execute(
-      'UPDATE vacation_requests SET status = ?, decline_reason = ? WHERE id = ?',
-      ['rejected', reason, id]
-    );
-
-    // Log activity
-    await log(
-      req.user.id,
-      req.user.name,
-      'vacation_declined',
-      `Declined blackout vacation for ${request.user_name} from ${request.start_date} to ${request.end_date} (${request.days} days). Reason: ${reason}`,
-      'vacation',
-      id
-    );
-
-    // Send email notification to the user
-    notifyVacationDeclined(
-      request.user_email,
-      request.user_name,
-      req.user.name,
-      request.start_date,
-      request.end_date,
-      request.days,
-      reason
-    ).catch(err => console.error('Email notification error:', err));
-
-    res.json({ message: 'Vacation declined and user notified' });
-  } catch (error) {
-    console.error('Decline vacation error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-module.exports = router;
+module.exports = {
+  notifyVacationSubmitted,
+  notifyVacationCancelled,
+  notifyVacationAdminCancelled,
+  sendWelcomeEmail,
+  notifyBlackoutApprovalRequest,
+  notifyVacationApproved,
+  notifyVacationDeclined
+};
