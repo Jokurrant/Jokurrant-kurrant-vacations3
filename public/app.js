@@ -2,7 +2,7 @@
 const API = '/api';
 const COLORS = ['#FE6B35','#3B82F6','#10B981','#8B5CF6','#F59E0B','#EC4899','#06B6D4','#84CC16','#F97316','#6366F1'];
 
-let S = { user:null, users:[], vacations:[], blackouts:[], activity:[], yearlyStats:null, statsYear:new Date().getFullYear(), notifications:[], tab:'dashboard', month:new Date(), showNotif:false, showPwdModal:false, showFilter:false, showUserHistory:null, showAdminCancelModal:null, filters:{blackouts:true,myVac:true,team:{}}, loading:true, error:null };
+let S = { user:null, users:[], vacations:[], blackouts:[], activity:[], yearlyStats:null, statsYear:new Date().getFullYear(), notifications:[], tab:'dashboard', month:new Date(), showNotif:false, showPwdModal:false, showFilter:false, showUserHistory:null, showAdminCancelModal:null, showDeclineModal:null, filters:{blackouts:true,myVac:true,team:{}}, loading:true, error:null };
 
 async function api(url, opt={}) {
   try {
@@ -71,7 +71,16 @@ async function checkAuth() {
   }
 }
 
-async function createVac(s,e,r) { const d=await api('/vacations',{method:'POST',body:JSON.stringify({startDate:s,endDate:e,reason:r})}); S.vacations.unshift(d); notify('🏖️ Vacation booked: '+s+' to '+e,'vacation'); }
+async function createVac(s,e,r) { 
+  const d=await api('/vacations',{method:'POST',body:JSON.stringify({startDate:s,endDate:e,reason:r})}); 
+  S.vacations.unshift(d); 
+  if(d.status === 'pending' && d.requiresApproval) {
+    notify('⏳ Request submitted - pending admin approval (blackout period)','warning');
+    return { pending: true, message: d.message };
+  }
+  notify('🏖️ Vacation booked: '+s+' to '+e,'vacation');
+  return { pending: false };
+}
 async function cancelVac(id) { 
   const v = S.vacations.find(x=>x.id===id);
   if(!v) return;
@@ -87,6 +96,27 @@ async function adminCancelVac(id, reason) {
   S.showAdminCancelModal = null;
   notify('Vacation cancelled - user notified'); 
   await load(); render(); 
+}
+
+// Approve pending vacation (for blackout requests)
+async function approveVac(id) {
+  if(!confirm('Approve this vacation request during the blackout period?')) return;
+  await api('/vacations/'+id+'/approve',{method:'POST'});
+  const v = S.vacations.find(x=>x.id===id);
+  if(v) v.status = 'approved';
+  notify('✅ Vacation approved - user notified','success');
+  await load(); render();
+}
+
+// Show decline modal
+function showDeclineModal(id) { S.showDeclineModal = id; render(); }
+function closeDeclineModal() { S.showDeclineModal = null; render(); }
+async function declineVac(id, reason) {
+  await api('/vacations/'+id+'/decline',{method:'POST',body:JSON.stringify({reason})});
+  S.vacations=S.vacations.filter(x=>x.id!==id);
+  S.showDeclineModal = null;
+  notify('❌ Vacation declined - user notified');
+  await load(); render();
 }
 
 async function createUser(n,e,r) { const x=await api('/users',{method:'POST',body:JSON.stringify({name:n,email:e,role:r})}); S.users.push(x.user); notify('✅ Account created for '+n+'. Temp password: '+x.tempPassword,'success'); await load(); render(); return x.tempPassword; }
@@ -131,6 +161,8 @@ const actionIcons = {
   'vacation_submitted': '🏖️',
   'vacation_cancelled': '❌',
   'vacation_admin_cancelled': '🚫',
+  'vacation_approved': '✅',
+  'vacation_declined': '❌',
   'user_created': '👤',
   'user_deleted': '🗑️',
   'user_role_changed': '👑',
@@ -165,6 +197,12 @@ const adminCancelModalHTML=()=>{
   return `<div class="modal-overlay" id="adminCancelModalOv"><div class="modal"><h2 class="modal-title">Cancel Vacation</h2><p style="margin-bottom:16px;color:var(--gray-500)">Cancel <strong>${v.userName}</strong>'s vacation. They will receive an email notification with your reason.</p><div style="background:var(--danger-light);border:1px solid var(--danger-border);border-radius:8px;padding:16px;margin-bottom:20px"><div style="font-weight:600;color:var(--danger)">${fmtNice(v.startDate)} → ${fmtNice(v.endDate)}</div><div style="font-size:14px;color:var(--gray-500);margin-top:4px">${v.days} days • ${v.reason||'No reason provided'}</div></div><form id="adminCancelForm" class="form"><div class="input-group"><label class="label">Reason for cancellation *</label><textarea id="cancelReason" class="input" rows="3" placeholder="Please provide a reason..." required style="resize:vertical"></textarea></div><div style="display:flex;gap:12px"><button type="button" class="btn btn-secondary" id="cancelAdminCancel">Cancel</button><button type="submit" class="btn btn-danger">Confirm Cancellation</button></div></form></div></div>`;
 };
 
+const declineModalHTML=()=>{
+  const v = S.vacations.find(x=>x.id===S.showDeclineModal);
+  if(!v) return '';
+  return `<div class="modal-overlay" id="declineModalOv"><div class="modal"><h2 class="modal-title">Decline Vacation Request</h2><p style="margin-bottom:16px;color:var(--gray-500)">Decline <strong>${v.userName}</strong>'s vacation request. They will receive an email notification with your reason.</p><div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:16px;margin-bottom:20px"><div style="font-weight:600;color:#92400e">${fmtNice(v.startDate)} → ${fmtNice(v.endDate)}</div><div style="font-size:14px;color:var(--gray-500);margin-top:4px">${v.days} days • ${v.reason||'No reason provided'}</div><div style="font-size:12px;color:#92400e;margin-top:8px">⚠️ This request overlaps with a blackout period</div></div><form id="declineForm" class="form"><div class="input-group"><label class="label">Reason for declining *</label><textarea id="declineReason" class="input" rows="3" placeholder="Please explain why this request cannot be approved..." required style="resize:vertical"></textarea></div><div style="display:flex;gap:12px"><button type="button" class="btn btn-secondary" id="cancelDecline">Cancel</button><button type="submit" class="btn btn-danger">Decline Request</button></div></form></div></div>`;
+};
+
 const userHistoryModalHTML=()=>{
   const u = S.users.find(x=>x.id===S.showUserHistory);
   if(!u) return '';
@@ -178,7 +216,7 @@ const userHistoryModalHTML=()=>{
   <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--gray-200);text-align:center;color:var(--gray-500)">Total: <strong style="color:var(--orange)">${userVacs.reduce((s,v)=>s+v.days,0)} days</strong> across ${userVacs.length} requests</div></div></div>`;
 };
 
-const dashHTML=()=>{const myDays=getMyDaysThisYear(),my=S.vacations.filter(v=>v.userId===S.user.id),upcoming=my.filter(v=>new Date(v.endDate)>=new Date());return`<div class="stats-grid"><div class="stat-card"><span class="stat-icon">🏖️</span><div><div class="stat-value">${myDays}</div><div class="stat-label">Days Taken (${new Date().getFullYear()})</div></div></div><div class="stat-card"><span class="stat-icon">📅</span><div><div class="stat-value">${upcoming.length}</div><div class="stat-label">Upcoming Vacations</div></div></div><div class="stat-card"><span class="stat-icon">👥</span><div><div class="stat-value">${S.users.length}</div><div class="stat-label">Team Members</div></div></div><div class="stat-card"><span class="stat-icon">🚫</span><div><div class="stat-value">${S.blackouts.length}</div><div class="stat-label">Blackout Periods</div></div></div></div><div class="section"><h2 class="section-title">Request Time Off</h2><form id="vacForm" class="form"><div class="form-row"><div class="input-group"><label class="label">Start Date</label><input type="date" id="vacS" class="input" required></div><div class="input-group"><label class="label">End Date</label><input type="date" id="vacE" class="input" required></div></div><div class="input-group"><label class="label">Reason</label><input type="text" id="vacR" class="input" placeholder="Family vacation, etc." required></div><div id="vacPrev"></div><button type="submit" class="btn btn-primary" id="vacSubmitBtn">Submit Request</button></form></div><div class="section"><h2 class="section-title">My Time Off</h2>${my.length===0?'<p class="empty">No vacation requests yet</p>':my.map(v=>`<div class="card"><div class="card-content"><div class="card-title">${fmt(v.startDate)} → ${fmt(v.endDate)}</div><div class="card-subtitle">${v.reason}</div><div class="card-meta">${v.days} days</div></div><button class="btn btn-cancel" onclick="cancelVac(${v.id})">Cancel</button></div>`).join('')}</div>${S.blackouts.length?`<div class="section"><h2 class="section-title">🚫 Blackout Periods</h2><p style="color:var(--gray-500);font-size:14px;margin-bottom:16px">These dates cannot be booked</p>${S.blackouts.map(b=>`<div class="blackout-card"><div class="blackout-title">${fmt(b.startDate)} → ${fmt(b.endDate)}</div><div style="font-size:14px;color:var(--gray-500);margin-top:4px"><strong>Reason:</strong> ${b.reason||'No reason specified'}</div></div>`).join('')}</div>`:''}`};
+const dashHTML=()=>{const myDays=getMyDaysThisYear(),my=S.vacations.filter(v=>v.userId===S.user.id),upcoming=my.filter(v=>new Date(v.endDate)>=new Date());return`<div class="stats-grid"><div class="stat-card"><span class="stat-icon">🏖️</span><div><div class="stat-value">${myDays}</div><div class="stat-label">Days Taken (${new Date().getFullYear()})</div></div></div><div class="stat-card"><span class="stat-icon">📅</span><div><div class="stat-value">${upcoming.length}</div><div class="stat-label">Upcoming Vacations</div></div></div><div class="stat-card"><span class="stat-icon">👥</span><div><div class="stat-value">${S.users.length}</div><div class="stat-label">Team Members</div></div></div><div class="stat-card"><span class="stat-icon">🚫</span><div><div class="stat-value">${S.blackouts.length}</div><div class="stat-label">Blackout Periods</div></div></div></div><div class="section"><h2 class="section-title">Request Time Off</h2><form id="vacForm" class="form"><div class="form-row"><div class="input-group"><label class="label">Start Date</label><input type="date" id="vacS" class="input" required></div><div class="input-group"><label class="label">End Date</label><input type="date" id="vacE" class="input" required></div></div><div class="input-group"><label class="label">Reason</label><input type="text" id="vacR" class="input" placeholder="Family vacation, etc." required></div><div id="vacPrev"></div><button type="submit" class="btn btn-primary" id="vacSubmitBtn">Submit Request</button></form></div><div class="section"><h2 class="section-title">My Time Off</h2>${my.length===0?'<p class="empty">No vacation requests yet</p>':my.map(v=>`<div class="card ${v.status==='pending'?'card-pending':''}${v.status==='rejected'?'card-rejected':''}"><div class="card-content"><div class="card-title">${fmt(v.startDate)} → ${fmt(v.endDate)} ${v.status==='pending'?'<span class="badge-pending">⏳ Pending Approval</span>':''}${v.status==='rejected'?'<span class="badge-rejected">❌ Declined</span>':''}</div><div class="card-subtitle">${v.reason}</div><div class="card-meta">${v.days} days${v.status==='rejected'&&v.declineReason?' • <span style="color:var(--danger)">Reason: '+v.declineReason+'</span>':''}</div></div>${v.status!=='rejected'?`<button class="btn btn-cancel" onclick="cancelVac(${v.id})">Cancel</button>`:''}</div>`).join('')}</div>${S.blackouts.length?`<div class="section"><h2 class="section-title">🚫 Blackout Periods</h2><p style="color:var(--gray-500);font-size:14px;margin-bottom:16px">These dates require admin approval</p>${S.blackouts.map(b=>`<div class="blackout-card"><div class="blackout-title">${fmt(b.startDate)} → ${fmt(b.endDate)}</div><div style="font-size:14px;color:var(--gray-500);margin-top:4px"><strong>Reason:</strong> ${b.reason||'No reason specified'}</div></div>`).join('')}</div>`:''}`};
 
 const calHTML=()=>{const cd=calData(),mn=S.month.toLocaleString('default',{month:'long',year:'numeric'}),af=Object.values(S.filters.team).filter(Boolean).length+(S.filters.myVac?1:0)+(S.filters.blackouts?1:0);return`<div class="section"><div class="calendar-header"><button class="btn btn-secondary" id="prevM">← Prev</button><h2 class="calendar-title">${mn}</h2><button class="btn btn-secondary" id="nextM">Next →</button></div><button class="filter-btn" id="filterBtn">🔍 Filter Calendar <span class="filter-badge">${af}</span></button>${S.showFilter?filterHTML():''}<div class="legend">${S.filters.blackouts?'<span class="legend-item"><span class="legend-dot" style="background:var(--danger)"></span> Blackout</span>':''}${S.filters.myVac?'<span class="legend-item"><span class="legend-dot" style="background:var(--orange)"></span> My Vacation</span>':''}${S.users.filter(u=>u.id!==S.user.id&&S.filters.team[u.id]).map(u=>`<span class="legend-item"><span class="legend-dot" style="background:${color(u.id)}"></span> ${u.name.split(' ')[0]}</span>`).join('')}</div><div class="calendar-grid">${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>`<div class="calendar-day-header">${d}</div>`).join('')}${cd.map(d=>`<div class="calendar-day ${d.day===null?'empty':''} ${d.isBlackout&&S.filters.blackouts?'blackout':''}" ${d.isBlackout&&d.blackoutReason?`title="🚫 Blackout: ${d.blackoutReason}"`:''}>${d.day?`<span class="day-number">${d.day}</span><div class="day-events">${d.events.filter(e=>e.type!=='blackout').map(e=>`<div class="event-dot" style="background:${color(e.userId)};${e.my?'border:2px solid #fff;box-shadow:0 0 0 2px var(--orange);':''}" title="${e.label}">${e.label.charAt(0)}</div>`).join('')}</div>`:''}</div>`).join('')}</div></div>`};
 
@@ -190,14 +228,20 @@ const yearlyStatsHTML=()=>{const years=[S.statsYear-2,S.statsYear-1,S.statsYear,
 
 const activityHTML=()=>`<div class="section"><h2 class="section-title">📜 Activity Log</h2><p style="color:var(--gray-500);font-size:14px;margin-bottom:16px">All actions are tracked and timestamped</p>${S.activity.length===0?'<p class="empty">No activity yet</p>':`<div style="max-height:400px;overflow-y:auto">${S.activity.map(a=>`<div class="activity-item"><span class="activity-icon">${actionIcons[a.action]||'📝'}</span><div class="activity-content"><div class="activity-desc">${a.description}</div><div class="activity-meta">by ${a.userName} • ${fmtTime(a.createdAt)}</div></div></div>`).join('')}</div>`}</div>`;
 
+const pendingApprovalsHTML=()=>{
+  const pending = S.vacations.filter(v=>v.status==='pending'&&v.requiresApproval);
+  if(pending.length === 0) return '';
+  return `<div class="section" style="border:2px solid #fcd34d;background:#fffbeb"><h2 class="section-title" style="color:#92400e">⏳ Pending Approvals (${pending.length})</h2><p style="color:#92400e;font-size:14px;margin-bottom:16px">These vacation requests overlap with blackout periods and require your approval.</p>${pending.map(v=>`<div class="card" style="background:#fff"><div class="avatar avatar-sm" style="background:${color(v.userId)}">${v.userName.charAt(0)}</div><div class="card-content"><div class="card-title">${v.userName}</div><div class="card-subtitle">${fmtNice(v.startDate)} → ${fmtNice(v.endDate)}</div><div class="card-meta">${v.days} days • ${v.reason||'No reason'}</div></div><div style="display:flex;gap:8px"><button class="btn btn-approve" onclick="approveVac(${v.id})">✅ Approve</button><button class="btn btn-decline" onclick="showDeclineModal(${v.id})">❌ Decline</button></div></div>`).join('')}</div>`;
+};
+
 const upcomingVacationsHTML=()=>{
-  const upcoming = S.vacations.filter(v=>new Date(v.endDate)>=new Date()).sort((a,b)=>new Date(a.startDate)-new Date(b.startDate));
+  const upcoming = S.vacations.filter(v=>v.status==='approved'&&new Date(v.endDate)>=new Date()).sort((a,b)=>new Date(a.startDate)-new Date(b.startDate));
   return `<div class="section"><h2 class="section-title">📅 Upcoming Vacations</h2>${upcoming.length===0?'<p class="empty">No upcoming vacations</p>':upcoming.map(v=>`<div class="card"><div class="avatar avatar-sm" style="background:${color(v.userId)}">${v.userName.charAt(0)}</div><div class="card-content"><div class="card-title">${v.userName}</div><div class="card-subtitle">${fmtNice(v.startDate)} → ${fmtNice(v.endDate)}</div><div class="card-meta">${v.reason}</div></div><div style="display:flex;align-items:center;gap:12px"><span style="font-weight:600;color:var(--orange)">${v.days} days</span><button class="btn btn-cancel" onclick="showAdminCancelModal(${v.id})">Cancel</button></div></div>`).join('')}</div>`;
 };
 
-const adminHTML=()=>`<div class="section"><h2 class="section-title">➕ Create New User</h2><form id="userForm" class="form"><div class="form-row"><div class="input-group"><label class="label">Full Name</label><input type="text" id="newN" class="input" placeholder="John Doe" required></div><div class="input-group"><label class="label">Email</label><input type="email" id="newE" class="input" placeholder="john@kurrant.com" required></div></div><div class="input-group"><label class="label">Role</label><select id="newR" class="input"><option value="member">Team Member</option><option value="admin">Admin</option></select></div><button type="submit" class="btn btn-primary">Create Account</button></form></div><div class="section"><h2 class="section-title">🚫 Set Blackout Dates</h2><form id="blackForm" class="form"><div class="form-row"><div class="input-group"><label class="label">Start Date</label><input type="date" id="blackS" class="input" required></div><div class="input-group"><label class="label">End Date</label><input type="date" id="blackE" class="input" required></div></div><div class="input-group"><label class="label">Reason *</label><input type="text" id="blackR" class="input" placeholder="Smart City Expo, etc." required></div><div id="blackPrev"></div><button type="submit" class="btn btn-danger">Set Blackout</button></form>${S.blackouts.length?`<div style="margin-top:24px"><h3 style="font-size:15px;margin-bottom:12px">Active Blackouts</h3>${S.blackouts.map(b=>`<div class="blackout-card" style="display:flex;justify-content:space-between;align-items:center"><div><div class="blackout-title">${fmt(b.startDate)} → ${fmt(b.endDate)}</div><div style="font-size:14px;color:var(--gray-500);margin-top:4px"><strong>Reason:</strong> ${b.reason||'No reason specified'}</div></div><button class="btn btn-danger" onclick="delBlackout(${b.id})">Remove</button></div>`).join('')}</div>`:''}</div>${upcomingVacationsHTML()}${yearlyStatsHTML()}<div class="section"><h2 class="section-title">👥 Manage Team</h2><p style="color:var(--gray-500);font-size:14px;margin-bottom:16px">Click on a user to view their full vacation history</p>${S.users.map(u=>{const userDays=S.vacations.filter(v=>v.userId===u.id&&new Date(v.startDate).getFullYear()===new Date().getFullYear()).reduce((s,v)=>s+v.days,0);return`<div class="manage-card" style="cursor:pointer" onclick="showUserVacationHistory(${u.id})"><div style="display:flex;align-items:center;gap:16px"><div class="avatar" style="background:${color(u.id)}">${u.name.charAt(0)}</div><div><div style="font-weight:600">${u.name}</div><div style="font-size:13px;color:var(--gray-500)">${u.email}</div><div style="font-size:12px;color:var(--orange);margin-top:2px">${userDays} days this year</div></div></div><div class="manage-actions" onclick="event.stopPropagation()"><span style="color:var(--gray-500)">${u.role==='admin'?'👑 Admin':'👤 Member'}</span>${u.id!==S.user.id?`<button class="btn btn-secondary" onclick="toggleRole(${u.id})">${u.role==='admin'?'Remove Admin':'Make Admin'}</button><button class="btn btn-cancel" onclick="delUser(${u.id})">Delete</button>`:''}</div></div>`;}).join('')}</div>${activityHTML()}`;
+const adminHTML=()=>`${pendingApprovalsHTML()}<div class="section"><h2 class="section-title">➕ Create New User</h2><form id="userForm" class="form"><div class="form-row"><div class="input-group"><label class="label">Full Name</label><input type="text" id="newN" class="input" placeholder="John Doe" required></div><div class="input-group"><label class="label">Email</label><input type="email" id="newE" class="input" placeholder="john@kurrant.com" required></div></div><div class="input-group"><label class="label">Role</label><select id="newR" class="input"><option value="member">Team Member</option><option value="admin">Admin</option></select></div><button type="submit" class="btn btn-primary">Create Account</button></form></div><div class="section"><h2 class="section-title">🚫 Set Blackout Dates</h2><form id="blackForm" class="form"><div class="form-row"><div class="input-group"><label class="label">Start Date</label><input type="date" id="blackS" class="input" required></div><div class="input-group"><label class="label">End Date</label><input type="date" id="blackE" class="input" required></div></div><div class="input-group"><label class="label">Reason *</label><input type="text" id="blackR" class="input" placeholder="Smart City Expo, etc." required></div><div id="blackPrev"></div><button type="submit" class="btn btn-danger">Set Blackout</button></form>${S.blackouts.length?`<div style="margin-top:24px"><h3 style="font-size:15px;margin-bottom:12px">Active Blackouts</h3>${S.blackouts.map(b=>`<div class="blackout-card" style="display:flex;justify-content:space-between;align-items:center"><div><div class="blackout-title">${fmt(b.startDate)} → ${fmt(b.endDate)}</div><div style="font-size:14px;color:var(--gray-500);margin-top:4px"><strong>Reason:</strong> ${b.reason||'No reason specified'}</div></div><button class="btn btn-danger" onclick="delBlackout(${b.id})">Remove</button></div>`).join('')}</div>`:''}</div>${upcomingVacationsHTML()}${yearlyStatsHTML()}<div class="section"><h2 class="section-title">👥 Manage Team</h2><p style="color:var(--gray-500);font-size:14px;margin-bottom:16px">Click on a user to view their full vacation history</p>${S.users.map(u=>{const userDays=S.vacations.filter(v=>v.userId===u.id&&v.status==='approved'&&new Date(v.startDate).getFullYear()===new Date().getFullYear()).reduce((s,v)=>s+v.days,0);return`<div class="manage-card" style="cursor:pointer" onclick="showUserVacationHistory(${u.id})"><div style="display:flex;align-items:center;gap:16px"><div class="avatar" style="background:${color(u.id)}">${u.name.charAt(0)}</div><div><div style="font-weight:600">${u.name}</div><div style="font-size:13px;color:var(--gray-500)">${u.email}</div><div style="font-size:12px;color:var(--orange);margin-top:2px">${userDays} days this year</div></div></div><div class="manage-actions" onclick="event.stopPropagation()"><span style="color:var(--gray-500)">${u.role==='admin'?'👑 Admin':'👤 Member'}</span>${u.id!==S.user.id?`<button class="btn btn-secondary" onclick="toggleRole(${u.id})">${u.role==='admin'?'Remove Admin':'Make Admin'}</button><button class="btn btn-cancel" onclick="delUser(${u.id})">Delete</button>`:''}</div></div>`;}).join('')}</div>${activityHTML()}`;
 
-const appHTML=()=>`${headerHTML()}${S.showNotif?notifHTML():''}${S.showPwdModal?pwdModalHTML():''}${S.showUserHistory?userHistoryModalHTML():''}${S.showAdminCancelModal?adminCancelModalHTML():''}<main class="main">${S.tab==='dashboard'?dashHTML():''}${S.tab==='calendar'?calHTML():''}${S.tab==='team'?teamHTML():''}${S.tab==='admin'&&S.user.role==='admin'?adminHTML():''}</main>`;
+const appHTML=()=>`${headerHTML()}${S.showNotif?notifHTML():''}${S.showPwdModal?pwdModalHTML():''}${S.showUserHistory?userHistoryModalHTML():''}${S.showAdminCancelModal?adminCancelModalHTML():''}${S.showDeclineModal?declineModalHTML():''}<main class="main">${S.tab==='dashboard'?dashHTML():''}${S.tab==='calendar'?calHTML():''}${S.tab==='team'?teamHTML():''}${S.tab==='admin'&&S.user.role==='admin'?adminHTML():''}</main>`;
 
 function attachLogin(){document.getElementById('loginForm')?.addEventListener('submit',async e=>{e.preventDefault();await login(document.getElementById('loginEmail').value,document.getElementById('loginPwd').value);});}
 
@@ -220,6 +264,16 @@ function attachApp(){
     const reason = document.getElementById('cancelReason').value;
     if(!reason.trim()){alert('Please provide a reason for cancellation');return;}
     try{ await adminCancelVac(S.showAdminCancelModal, reason); }catch(err){alert(err.message);}
+  });
+  
+  // Decline modal handlers
+  document.getElementById('cancelDecline')?.addEventListener('click',closeDeclineModal);
+  document.getElementById('declineModalOv')?.addEventListener('click',e=>{if(e.target.id==='declineModalOv')closeDeclineModal();});
+  document.getElementById('declineForm')?.addEventListener('submit',async e=>{
+    e.preventDefault();
+    const reason = document.getElementById('declineReason').value;
+    if(!reason.trim()){alert('Please provide a reason for declining');return;}
+    try{ await declineVac(S.showDeclineModal, reason); }catch(err){alert(err.message);}
   });
   
   if(S.tab==='dashboard'){
@@ -251,7 +305,7 @@ function attachApp(){
         const past=isPast(vs.value,ve.value);
         let html = '';
         if(ov){
-          html='<div class="preview preview-error">⚠️ Overlaps with blackout period!</div>';
+          html='<div class="preview preview-warning">⚠️ Overlaps with blackout period - will require admin approval</div>';
         } else if(past){
           html=`<div class="preview preview-warning">⚠️ These dates are in the past. This will use ${d} business days.</div>`;
         } else {
@@ -279,8 +333,17 @@ function attachApp(){
         if(!proceed) return;
       }
       
+      // Check if overlaps with blackout - warn user
+      if(hasOverlap(startVal, endVal, S.blackouts)){
+        const proceed = confirm('⚠️ These dates overlap with a blackout period.\n\nYour request will require admin approval. Do you want to continue?');
+        if(!proceed) return;
+      }
+      
       try{
-        await createVac(startVal,endVal,reason);
+        const result = await createVac(startVal,endVal,reason);
+        if(result.pending) {
+          alert('✅ Request Submitted\n\n' + result.message);
+        }
         await load();
         render();
       }catch(err){alert(err.message);}
@@ -341,5 +404,5 @@ function attachApp(){
   }
 }
 
-window.cancelVac=cancelVac;window.delBlackout=delBlackout;window.toggleRole=toggleRole;window.delUser=delUser;window.loadYearlyStats=loadYearlyStats;window.showUserVacationHistory=showUserVacationHistory;window.closeUserHistory=closeUserHistory;window.showAdminCancelModal=showAdminCancelModal;window.closeAdminCancelModal=closeAdminCancelModal;
+window.cancelVac=cancelVac;window.delBlackout=delBlackout;window.toggleRole=toggleRole;window.delUser=delUser;window.loadYearlyStats=loadYearlyStats;window.showUserVacationHistory=showUserVacationHistory;window.closeUserHistory=closeUserHistory;window.showAdminCancelModal=showAdminCancelModal;window.closeAdminCancelModal=closeAdminCancelModal;window.approveVac=approveVac;window.showDeclineModal=showDeclineModal;window.closeDeclineModal=closeDeclineModal;
 checkAuth();
