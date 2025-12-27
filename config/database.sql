@@ -24,10 +24,16 @@ CREATE TABLE IF NOT EXISTS vacation_requests (
   reason VARCHAR(500),
   days INT NOT NULL,
   status ENUM('pending', 'approved', 'rejected', 'cancelled') DEFAULT 'approved',
+  requires_approval BOOLEAN DEFAULT FALSE,
+  decline_reason VARCHAR(500),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+-- To add columns to existing table, run:
+-- ALTER TABLE vacation_requests ADD COLUMN requires_approval BOOLEAN DEFAULT FALSE;
+-- ALTER TABLE vacation_requests ADD COLUMN decline_reason VARCHAR(500);
 
 -- Blackout dates table
 CREATE TABLE IF NOT EXISTS blackout_dates (
