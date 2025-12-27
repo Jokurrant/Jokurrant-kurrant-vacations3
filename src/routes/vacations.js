@@ -6,6 +6,14 @@ const { log, ACTIONS } = require('../services/activityLog');
 
 const router = express.Router();
 
+// Format date to YYYY-MM-DD string (fixes timezone issues)
+const formatDate = (date) => {
+  if (!date) return null;
+  if (typeof date === 'string') return date.split('T')[0];
+  const d = new Date(date);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+
 // Calculate business days between two dates
 const getBusinessDays = (start, end) => {
   let count = 0;
@@ -46,8 +54,8 @@ router.get('/', authenticate, async (req, res) => {
       id: r.id,
       userId: r.user_id,
       userName: r.user_name,
-      startDate: r.start_date,
-      endDate: r.end_date,
+      startDate: formatDate(r.start_date),
+      endDate: formatDate(r.end_date),
       reason: r.reason,
       days: r.days,
       status: r.status,
@@ -111,8 +119,8 @@ router.get('/my', authenticate, async (req, res) => {
     res.json(requests.map(r => ({
       id: r.id,
       userId: r.user_id,
-      startDate: r.start_date,
-      endDate: r.end_date,
+      startDate: formatDate(r.start_date),
+      endDate: formatDate(r.end_date),
       reason: r.reason,
       days: r.days,
       status: r.status,
