@@ -5,6 +5,14 @@ const { log, ACTIONS } = require('../services/activityLog');
 
 const router = express.Router();
 
+// Format date to YYYY-MM-DD string (fixes timezone issues)
+const formatDate = (date) => {
+  if (!date) return null;
+  if (typeof date === 'string') return date.split('T')[0];
+  const d = new Date(date);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+
 // Get all blackout dates
 router.get('/', authenticate, async (req, res) => {
   try {
@@ -17,8 +25,8 @@ router.get('/', authenticate, async (req, res) => {
     
     res.json(blackouts.map(b => ({
       id: b.id,
-      startDate: b.start_date,
-      endDate: b.end_date,
+      startDate: formatDate(b.start_date),
+      endDate: formatDate(b.end_date),
       reason: b.reason,
       createdBy: b.created_by_name || 'System',
       createdAt: b.created_at
