@@ -266,9 +266,200 @@ If you have questions about this cancellation, please contact your administrator
   }
 }
 
+async function notifyBlackoutApprovalRequest(db, userName, startDate, endDate, days, reason) {
+  const subject = `⚠️ Blackout Date Vacation Request: ${userName}`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #f59e0b;">⚠️ Approval Required</h2>
+        <p><strong>${userName}</strong> has requested vacation during a <strong>blackout period</strong> and requires your approval:</p>
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>Duration:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Reason:</strong></td>
+            <td style="padding: 10px;">${reason || 'Not specified'}</td>
+          </tr>
+        </table>
+        <div style="background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #92400e;"><strong>Action Required:</strong> Please log in to the admin panel to approve or decline this request.</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Blackout Date Vacation Request - Approval Required
+
+${userName} has requested vacation during a blackout period and requires your approval:
+
+From: ${formatDate(startDate)}
+To: ${formatDate(endDate)}
+Duration: ${days} business day(s)
+Reason: ${reason || 'Not specified'}
+
+Please log in to the admin panel to approve or decline this request.`;
+
+  await sendToAdmins(db, subject, htmlBody, textBody);
+}
+
+async function notifyVacationApproved(userEmail, userName, adminName, startDate, endDate, days) {
+  if (!client) {
+    console.log('📧 Postmark not configured - skipping approval email');
+    return;
+  }
+
+  const subject = `✅ Your Vacation Request Has Been Approved!`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #16a34a;">✅ Vacation Approved</h2>
+        <p>Hi ${userName},</p>
+        <p>Great news! Your vacation request has been <strong>approved</strong> by ${adminName}.</p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Duration:</strong></td>
+            <td style="padding: 10px;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+        </table>
+        
+        <div style="background: #dcfce7; border: 1px solid #86efac; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #166534;">Your time off is now confirmed! Enjoy your vacation! 🏖️</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Vacation Approved!
+
+Hi ${userName},
+
+Great news! Your vacation request has been approved by ${adminName}.
+
+From: ${formatDate(startDate)}
+To: ${formatDate(endDate)}
+Duration: ${days} business day(s)
+
+Your time off is now confirmed! Enjoy your vacation!`;
+
+  try {
+    await client.sendEmail({
+      From: fromEmail,
+      To: userEmail,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody
+    });
+    console.log(`📧 Vacation approval email sent to ${userEmail}`);
+  } catch (err) {
+    console.error(`❌ Failed to send approval email to ${userEmail}:`, err.message);
+  }
+}
+
+async function notifyVacationDeclined(userEmail, userName, adminName, startDate, endDate, days, reason) {
+  if (!client) {
+    console.log('📧 Postmark not configured - skipping decline email');
+    return;
+  }
+
+  const subject = `❌ Your Vacation Request Has Been Declined`;
+  
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #FE6B35; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h1 style="margin: 0;">Kurrant TimeOff</h1>
+      </div>
+      <div style="padding: 20px; background: #f9f9f9; border-radius: 0 0 8px 8px;">
+        <h2 style="color: #dc2626;">❌ Vacation Request Declined</h2>
+        <p>Hi ${userName},</p>
+        <p>Unfortunately, your vacation request has been <strong>declined</strong> by ${adminName}.</p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>From:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(startDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;"><strong>To:</strong></td>
+            <td style="padding: 10px; border-bottom: 1px solid #ddd;">${formatDate(endDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px;"><strong>Duration:</strong></td>
+            <td style="padding: 10px;">${days} business day${days > 1 ? 's' : ''}</td>
+          </tr>
+        </table>
+        
+        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 15px; margin: 20px 0;">
+          <p style="margin: 0; color: #dc2626;"><strong>Reason:</strong></p>
+          <p style="margin: 10px 0 0; color: #333;">${reason}</p>
+        </div>
+        
+        <p style="color: #666; font-size: 14px; margin-top: 30px;">If you have questions, please contact your administrator.</p>
+      </div>
+    </div>
+  `;
+
+  const textBody = `Vacation Request Declined
+
+Hi ${userName},
+
+Unfortunately, your vacation request has been declined by ${adminName}.
+
+From: ${formatDate(startDate)}
+To: ${formatDate(endDate)}
+Duration: ${days} business day(s)
+
+Reason:
+${reason}
+
+If you have questions, please contact your administrator.`;
+
+  try {
+    await client.sendEmail({
+      From: fromEmail,
+      To: userEmail,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody
+    });
+    console.log(`📧 Vacation decline email sent to ${userEmail}`);
+  } catch (err) {
+    console.error(`❌ Failed to send decline email to ${userEmail}:`, err.message);
+  }
+}
+
 module.exports = {
   notifyVacationSubmitted,
   notifyVacationCancelled,
   notifyVacationAdminCancelled,
-  sendWelcomeEmail
+  sendWelcomeEmail,
+  notifyBlackoutApprovalRequest,
+  notifyVacationApproved,
+  notifyVacationDeclined
 };
